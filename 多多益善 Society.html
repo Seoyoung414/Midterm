@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>多多益善 Society</title>
+  <!-- Pretendard & Bebas Neue 폰트 로드 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet">
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Pretendard Variable", sans-serif; font-weight: 400; }
+    body, html { width: 100vw; height: 100vh; overflow: hidden; background: #0000FF; color: #FFF; }
+    #webcam { display: none; }
+    #canvas3d, #grid2d-canvas, #single-cam-canvas { width: 100vw; height: 100vh; display: block; }
+
+    /* 디폴트 히어로 타이포그래피 ("YOU ARE THE MEDIA") */
+    #hero-title {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 500pt;
+      color: #FF2A2A;
+      text-transform: uppercase;
+      white-space: nowrap;
+      pointer-events: none;
+      z-index: 10;
+      line-height: 0.8;
+      letter-spacing: -6px;
+      user-select: none;
+      transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+      text-shadow: 0 0 30px rgba(0, 0, 0, 0.4);
+    }
+
+    #hero-title.hidden {
+      opacity: 0;
+      transform: translate(-50%, -55%) scale(0.95);
+    }
+
+    @media (max-width: 1920px) { #hero-title { font-size: 14vw; } }
+
+    /* 2D Grid Mode Overlay */
+    #grid2d-container { 
+      position: absolute; inset: 0; display: none; z-index: 100; background: #0000FF; cursor: pointer;
+    }
+    #grid2d-canvas { transform: scaleX(-1); }
+
+    /* Single Webcam Overlay */
+    #single-cam-container {
+      position: absolute; inset: 0; display: none; z-index: 150;
+      background: #0000FF; justify-content: center; align-items: center;
+    }
+    #single-cam-box {
+      width: 640px; height: 480px; max-width: 90vw; max-height: 80vh;
+      background: #000; border: none; transform: scaleX(-1); cursor: pointer;
+    }
+
+    /* 커스텀 레드 아이 커서 */
+    #custom-cursor { 
+      position: fixed; pointer-events: none; z-index: 9999; display: none; 
+      transform: translate(-50%, -50%); align-items: center; justify-content: center;
+    }
+
+    #loading-screen { position: fixed; inset: 0; background: #0000FF; display: flex; justify-content: center; align-items: center; z-index: 200; transition: opacity 0.5s; }
+    .loading-bar-track { width: 180px; height: 2px; background: rgba(255, 255, 255, 0.2); overflow: hidden; position: relative; }
+    .loading-bar-fill { position: absolute; top: 0; left: 0; height: 100%; width: 0%; background: #FFF; transition: width 0.2s; }
+  </style>
+
+  <script type="importmap">
+    { 
+      "imports": { 
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js", 
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" 
+      } 
+    }
+  </script>
+</head>
+<body>
+  <video id="webcam" autoplay playsinline></video>
+  <canvas id="canvas3d"></canvas>
+
+  <div id="hero-title">YOU ARE THE MEDIA</div>
+
+  <!-- 2D 1003 Time-Delay 페이지 (gif 완전 제거) -->
+  <div id="grid2d-container">
+    <canvas id="grid2d-canvas"></canvas>
+  </div>
+
+  <!-- 단일 웹캠 전용 모드 오버레이 -->
+  <div id="single-cam-container">
+    <canvas id="single-cam-box"></canvas>
+  </div>
+
+  <!-- 커스텀 레드 아이 커서 -->
+  <div id="custom-cursor">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+      <path d="M1 12C3.5 6.5 7.5 4 12 4C16.5 4 20.5 6.5 23 12C20.5 17.5 16.5 20 12 20C7.5 20 3.5 17.5 1 12Z" stroke="#FF2A2A" stroke-width="1.5" stroke-linecap="square"/>
+      <circle cx="12" cy="12" r="3.5" stroke="#FF2A2A" stroke-width="1.5"/>
+      <circle cx="12" cy="12" r="1" fill="#FF2A2A"/>
+    </svg>
+  </div>
+
+  <div id="loading-screen">
+    <div class="loading-bar-track"><div class="loading-bar-fill" id="loading-bar"></div></div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { ImageSegmenter, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+    const $ = id => document.getElementById(id);
+    const video = $('webcam'), canvas3d = $('canvas3d'), grid2dContainer = $('grid2d-container');
+    const grid2dCanvas = $('grid2d-canvas'), customCursor = $('custom-cursor');
+    const singleCamContainer = $('single-cam-container'), singleCamBox = $('single-cam-box');
+    const heroTitle = $('hero-title');
+    const loadingScreen = $('loading-screen'), loadingBar = $('loading-bar');
+
+    let is2DMode = false, isSingleCamMode = false, titleDismissed = false;
+    let imageSegmenter = null, isModelLoaded = false, isWebcamReady = false;
+    const TOTAL_CAMS = 1003, COLS_2D = 38, ROWS_2D = Math.ceil(TOTAL_CAMS / COLS_2D), frameHistory = [];
+
+    const offCanvas = document.createElement('canvas'); offCanvas.width = 640; offCanvas.height = 480;
+    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+
+    let scene, camera, renderer, controls, guardTowerMesh;
+    const monitorMeshes = [];
+    const raycaster = new THREE.Raycaster(), mouse = new THREE.Vector2();
+
+    const startCamPos = new THREE.Vector3(0, 30, 95);  
+    const targetCamPos = new THREE.Vector3(0, 7.5, 23); 
+    const startCamTarget = new THREE.Vector3(0, 10, 0);
+    const finalCamTarget = new THREE.Vector3(0, 11, 0);
+
+    let isZooming = false, zoomProgress = 0;
+
+    function init3D() {
+      scene = new THREE.Scene(); scene.background = new THREE.Color(0x0000FF);
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.copy(startCamPos);
+
+      renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, powerPreference: "high-performance" });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true; controls.dampingFactor = 0.05;
+      controls.maxPolarAngle = Math.PI / 2 + 0.08; controls.target.copy(startCamTarget);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.5); dirLight.position.set(20, 40, 20);
+      scene.add(dirLight);
+
+      buildDadaikseonAuthentic();
+      buildGuardTower();
+
+      window.addEventListener('resize', onResize);
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('click', onClick);
+
+      setTimeout(() => { isZooming = true; }, 100);
+    }
+
+    function buildDadaikseonAuthentic() {
+      const bodyMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.4 });
+      const whiteScreenMat = new THREE.MeshBasicMaterial({ color: 0xFFFFFF });
+      const mats = [bodyMat, bodyMat, bodyMat, bodyMat, whiteScreenMat, bodyMat];
+      const boxGeo = new THREE.BoxGeometry(0.68, 0.51, 0.13);
+
+      const layersConfig = [
+        { count: 240, radius: 13.5, y: 0.3, tilt: Math.PI / 3.5 },
+        { count: 190, radius: 11.2, y: 1.1, tilt: Math.PI / 5.0 },
+        { count: 160, radius: 9.0,  y: 2.6, tilt: 0 }, { count: 130, radius: 7.2,  y: 4.8, tilt: 0 },
+        { count: 100, radius: 5.6,  y: 7.2, tilt: 0 }, { count: 70,  radius: 4.2,  y: 9.8, tilt: 0 },
+        { count: 48,  radius: 3.1,  y: 12.6, tilt: 0 }, { count: 26,  radius: 2.0,  y: 15.4, tilt: 0 },
+        { count: 12,  radius: 1.1,  y: 18.2, tilt: 0 }, { count: 7,   radius: 0.7,  y: 20.0, tilt: 0 }
+      ];
+
+      let created = 0;
+      layersConfig.forEach(layer => {
+        const rows = layer.tilt !== 0 ? 2 : Math.max(1, Math.round(layer.count / (layer.radius * 5.5)));
+        const items = Math.ceil(layer.count / rows);
+
+        for (let r = 0; r < rows; r++) {
+          for (let i = 0; i < items && created < TOTAL_CAMS; i++) {
+            const angle = (i / items) * Math.PI * 2;
+            const mesh = new THREE.Mesh(boxGeo, mats);
+            const currY = layer.y + (r * 0.56);
+            const currRad = layer.radius + (layer.tilt !== 0 ? r * 0.7 : 0);
+
+            mesh.position.set(Math.cos(angle) * currRad, currY, Math.sin(angle) * currRad);
+            mesh.lookAt(0, currY, 0); mesh.rotateY(Math.PI);
+            if (layer.tilt !== 0) mesh.rotateX(layer.tilt);
+
+            scene.add(mesh);
+            monitorMeshes.push(mesh);
+            created++;
+          }
+        }
+      });
+    }
+
+    function buildGuardTower() {
+      guardTowerMesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.7, 1.0, 12, 24), 
+        new THREE.MeshStandardMaterial({ color: 0x020202, roughness: 0.2, metalness: 0.8 })
+      );
+      guardTowerMesh.position.set(0, 6.0, 0);
+      scene.add(guardTowerMesh);
+    }
+
+    function onResize() {
+      camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      grid2dCanvas.width = window.innerWidth; grid2dCanvas.height = window.innerHeight;
+    }
+
+    function dismissTitle() {
+      if (!titleDismissed) {
+        titleDismissed = true;
+        heroTitle.classList.add('hidden');
+      }
+    }
+
+    function onMouseMove(e) {
+      mouse.x = (e.clientX / window.innerWidth) * 2 - 1; 
+      mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+      customCursor.style.left = `${e.clientX}px`; customCursor.style.top = `${e.clientY}px`;
+
+      let showEye = false;
+
+      // 2D 모드: 1,003개 웹캠 그리드 화면 전체 호버 시 눈 커서 표시
+      if (is2DMode) {
+        showEye = true;
+      } else if (isSingleCamMode) {
+        const rect = singleCamBox.getBoundingClientRect();
+        showEye = (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom);
+      } else if (guardTowerMesh) {
+        raycaster.setFromCamera(mouse, camera);
+        showEye = raycaster.intersectObject(guardTowerMesh, true).length > 0;
+      }
+
+      document.body.style.cursor = showEye ? 'none' : 'default';
+      customCursor.style.display = showEye ? 'flex' : 'none';
+    }
+
+    function onClick(e) {
+      dismissTitle(); 
+
+      // 2D 모드: 화면 어디든 클릭 시 3D 홈으로 복귀
+      if (is2DMode) {
+        is2DMode = false;
+        grid2dContainer.style.display = 'none';
+        document.body.style.cursor = 'default';
+        customCursor.style.display = 'none';
+        return;
+      }
+
+      if (isSingleCamMode) {
+        const rect = singleCamBox.getBoundingClientRect();
+        if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+          isSingleCamMode = false;
+          singleCamContainer.style.display = 'none';
+          document.body.style.cursor = 'default';
+          customCursor.style.display = 'none';
+        }
+        return;
+      }
+
+      raycaster.setFromCamera(mouse, camera);
+
+      if (guardTowerMesh && raycaster.intersectObject(guardTowerMesh, true).length > 0) {
+        is2DMode = true;
+        grid2dContainer.style.display = 'block';
+        document.body.style.cursor = 'default';
+        customCursor.style.display = 'none';
+        onResize();
+        return;
+      }
+
+      if (raycaster.intersectObjects(monitorMeshes).length > 0) {
+        isSingleCamMode = true;
+        singleCamContainer.style.display = 'flex';
+        document.body.style.cursor = 'default';
+        customCursor.style.display = 'none';
+      }
+    }
+
+    async function setupAIAndWebcam() {
+      loadingBar.style.width = '30%';
+      try {
+        const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+        imageSegmenter = await ImageSegmenter.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite", delegate: "GPU" },
+          runningMode: "VIDEO", outputCategoryMask: true
+        });
+        isModelLoaded = true; loadingBar.style.width = '70%';
+
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+        video.srcObject = stream;
+        video.onloadeddata = () => {
+          isWebcamReady = true; loadingBar.style.width = '100%';
+          setTimeout(() => { loadingScreen.style.opacity = '0'; setTimeout(() => loadingScreen.style.display = 'none', 500); }, 300);
+        };
+      } catch (err) { loadingScreen.style.display = 'none'; }
+    }
+
+    let lastVideoTime = -1;
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (isZooming && zoomProgress < 1) {
+        zoomProgress += 0.025;
+        const easeProgress = Math.min(1, zoomProgress);
+        camera.position.lerpVectors(startCamPos, targetCamPos, easeProgress);
+        controls.target.lerpVectors(startCamTarget, finalCamTarget, easeProgress);
+        if (zoomProgress >= 1) isZooming = false;
+      }
+
+      controls.update();
+
+      if (isWebcamReady && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        if (isModelLoaded && imageSegmenter) {
+          imageSegmenter.segmentForVideo(video, performance.now(), res => processFrame(res.categoryMask));
+        } else {
+          processFrameFallback();
+        }
+      }
+
+      if (is2DMode) render2DGrid();
+      else if (isSingleCamMode) renderSingleCam();
+      else renderer.render(scene, camera);
+    }
+
+    function processFrame(categoryMask) {
+      offCtx.drawImage(video, 0, 0, 640, 480);
+      const frame = offCtx.getImageData(0, 0, 640, 480), data = frame.data, mask = categoryMask.getAsUint8Array();
+      for (let i = 0; i < mask.length; i++) {
+        if (mask[i] === 0) { 
+          const idx = i * 4; 
+          data[idx] = data[idx + 1] = data[idx + 2] = data[idx + 3] = 255; 
+        }
+      }
+      offCtx.putImageData(frame, 0, 0);
+      saveHistory();
+    }
+
+    function processFrameFallback() { offCtx.drawImage(video, 0, 0, 640, 480); saveHistory(); }
+
+    function saveHistory() {
+      const fc = document.createElement('canvas'); fc.width = 640; fc.height = 480;
+      fc.getContext('2d').drawImage(offCanvas, 0, 0);
+      frameHistory.unshift(fc);
+      if (frameHistory.length > 120) frameHistory.pop();
+    }
+
+    function render2DGrid() {
+      if (!frameHistory.length) return;
+      const ctx = grid2dCanvas.getContext('2d'), cw = grid2dCanvas.width, ch = grid2dCanvas.height;
+      ctx.fillStyle = "#0000FF"; ctx.fillRect(0, 0, cw, ch);
+      const cellW = cw / COLS_2D, cellH = ch / ROWS_2D;
+
+      let count = 0;
+      for (let r = 0; r < ROWS_2D; r++) {
+        for (let c = 0; c < COLS_2D && count < TOTAL_CAMS; c++) {
+          const idx = Math.floor((count / (TOTAL_CAMS - 1)) * (frameHistory.length - 1));
+          ctx.drawImage(frameHistory[idx] || frameHistory[0], c * cellW, r * cellH, cellW, cellH);
+          count++;
+        }
+      }
+    }
+
+    function renderSingleCam() {
+      if (!frameHistory.length) return;
+      const ctx = singleCamBox.getContext('2d');
+      if (singleCamBox.width !== 640) { singleCamBox.width = 640; singleCamBox.height = 480; }
+      ctx.drawImage(frameHistory[0], 0, 0, 640, 480);
+    }
+
+    init3D();
+    setupAIAndWebcam();
+    animate();
+  </script>
+</body>
+</html>
